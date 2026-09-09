@@ -5,7 +5,6 @@
 import { createServer } from "node:http"
 import { readFile, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
-import { networkInterfaces } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -110,16 +109,6 @@ const server = createServer(async (req, res) => {
   res.end("not found")
 })
 
-function lanAddresses() {
-  return Object.values(networkInterfaces())
-    .flat()
-    .filter((a) => a && a.family === "IPv4" && !a.internal)
-    .map((a) => a.address)
-}
-
-server.listen(PORT, "0.0.0.0", () => {
+server.listen(PORT, "127.0.0.1", () => {
   console.log(`protoman gallery: http://localhost:${PORT}  (data: ${DATA_DIR})`)
-  for (const addr of lanAddresses()) {
-    console.log(`  also reachable on your network at: http://${addr}:${PORT}`)
-  }
 })

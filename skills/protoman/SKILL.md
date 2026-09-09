@@ -47,8 +47,8 @@ for it explicitly, it isn't part of "run a round."
 {
   "round": "round-01",
   "variants": [
-    { "id": "a", "name": "A - Native+", "rationale": "one line", "html": "<div class=\"pm-a\">...self-contained mockup markup + its own scoped <style>...</div>" },
-    { "id": "b", "name": "B - Menu list", "rationale": "...", "html": "..." }
+    { "id": "a", "name": "A - Compact", "rationale": "one line", "html": "<div class=\"pm-a\">...self-contained mockup markup + its own scoped <style>...</div>" },
+    { "id": "b", "name": "B - Expanded", "rationale": "...", "html": "..." }
   ]
 }
 ```
@@ -58,19 +58,14 @@ for it explicitly, it isn't part of "run a round."
 HTML do apply, this works fine. Two hard rules the gallery shell depends on, both learned the
 hard way in earlier use:
 
-- **Every mockup's outer wrapper must set an explicit text `color`** matching its own hardcoded
-  light-mode background — never rely on inheriting the page's `--fg`. `--fg` flips to near-white
-  in dark mode; a mockup with a hardcoded light background and no explicit color renders
-  invisible (light-on-light) for any viewer in dark mode.
-- **A fake dropdown/menu must actually open on click**, not show permanently-visible "closed"
-  and "open" states side by side. Wrap trigger + menu in `<div class="pm-demo">`, put
-  `pm-toggle-trigger` on the trigger and `class="menu pm-toggle-menu" hidden` on the menu — the
-  shell's shared delegated click handler opens/closes it and closes it on outside click.
-- A genuinely native control (a real `<select>`) opens itself, but set `color-scheme: light` on
-  it if the mockup only defines light colors — otherwise OS dark mode can render its native
-  popup dark with your light-only text. Even then, that popup's exact styling is partly outside
-  page CSS control on some platforms (Linux GTK theming, for one) — call that out to the user as
-  a real tradeoff of choosing a native control over a custom one, not just a bug to chase forever.
+- **Every mockup's outer wrapper must set explicit text and background colors** rather than
+  inheriting the page's theme variables — otherwise a mockup with hardcoded colors can render
+  illegibly (e.g. light-on-light) for a viewer whose OS theme differs from the mockup's.
+- **Any fake interactive control (a dropdown, menu, popover) must actually toggle on click**,
+  not show permanently-visible "closed" and "open" states side by side. Wrap trigger + menu in
+  `<div class="pm-demo">`, put `pm-toggle-trigger` on the trigger and
+  `class="menu pm-toggle-menu" hidden` on the menu — the shell's shared delegated click handler
+  opens/closes it and closes it on outside click.
 
 ## The contract
 
@@ -159,9 +154,7 @@ rated how and why, quoting comments), and decide the next step:
   are the durable record of *why* — keep them accurate even across many rounds.
 - If the server isn't running, the gallery still renders but rating/chat sends silently fail to
   persist until it's back (best-effort, no error banner).
-- The server binds `0.0.0.0` and logs every LAN-reachable address on startup, so the gallery is
-  reachable from other devices on the network, not just `localhost` — hand out whichever LAN
-  address it printed if the user wants to review from another machine.
+- The server binds `localhost` and prints its URL on startup.
 - To respond to feedback as it's submitted rather than waiting to be asked, watch
   `<project>/protoman/feedback.json` for changes — via your harness's file-watch
   capability, or a plain polling loop — running

@@ -1,0 +1,490 @@
+<!--
+  PROTOMAN GALLERY SHELL — ships with the protoman skill, in
+  ~/.claude/skills/protoman/assets/. Served by assets/server.mjs. This file
+  is never edited per project or per round — a round's content lives
+  entirely in <project>/protoman/round.json, fetched at load via
+  GET /api/round and rendered into the DOM below by the script at the
+  bottom. If you're a Claude session running the protoman skill: do not
+  edit this file. Write round.json instead.
+
+  round.json shape: { "round": "round-01", "variants": [
+    { "id": "a", "name": "A - Native+", "rationale": "one line", "html": "<div>...</div>" },
+    ...
+  ]}
+  "html" is a self-contained mockup fragment (its own <style> scoped by a
+  unique class per variant is fine — style tags inside injected HTML do
+  apply). Every variant's own text must set an explicit color (don't
+  inherit the page's --fg, which flips in dark mode) — see the
+  MOCKUP TEXT COLOR note in SKILL.md. A fake interactive menu should use
+  the `.pm-demo` / `.pm-toggle-trigger` / `.pm-toggle-menu` contract (see
+  SKILL.md) so the delegated click handler below opens/closes it for real.
+
+  LAYOUT: `.sidebar` is a resizable chat panel fixed to the left edge of
+  the viewport, with its own top banner (`.sidebar-head`, "Protoman" +
+  round id). `header.page` is the ONLY other header chrome — tabs (built
+  from round.json) on the left, the four rating buttons (Perfect/Ok/Egh/
+  Yuck, static, already in this file) pushed right. Both bars are a fixed
+  48px tall. `.content` holds `#panels`, populated at runtime with one
+  `.variant-card` per round.json variant, exactly one visible at a time
+  (toggled by the tabs). Rating is set via the header's rating-row against
+  whichever variant's tab is active; clicking the active rating again
+  clears it to "pending". Chat messages are `{id, from, text, variant,
+  replyTo, pending, ts}` per protoman/feedback.json's "_messages" array —
+  see SKILL.md for the full protocol (pending-then-update, reply quoting).
+-->
+<meta charset="utf-8">
+<title>Protoman Gallery</title>
+<style>
+  :root {
+    --bg: oklch(1 0 0);
+    --fg: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-fg: oklch(0.145 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-fg: oklch(0.556 0 0);
+    --border: oklch(0.922 0 0);
+    --perfect: oklch(0.6 0.14 155);
+    --perfect-fg: oklch(0.98 0.02 155);
+    --ok: oklch(0.62 0.13 230);
+    --ok-fg: oklch(0.98 0.02 230);
+    --egh: oklch(0.78 0.14 80);
+    --egh-fg: oklch(0.28 0.05 80);
+    --yuck: oklch(0.577 0.245 27.325);
+    --yuck-fg: oklch(0.98 0.02 27);
+    --radius: 0.625rem;
+    --sidebar-w: 300px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: oklch(0.145 0 0);
+      --fg: oklch(0.985 0 0);
+      --card: oklch(0.205 0 0);
+      --card-fg: oklch(0.985 0 0);
+      --muted: oklch(0.269 0 0);
+      --muted-fg: oklch(0.708 0 0);
+      --border: oklch(1 0 0 / 12%);
+      --perfect: oklch(0.7 0.15 155);
+      --ok: oklch(0.7 0.13 230);
+      --egh: oklch(0.8 0.14 80);
+      --yuck: oklch(0.704 0.191 22.216);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: oklch(0.145 0 0);
+    --fg: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-fg: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-fg: oklch(0.708 0 0);
+    --border: oklch(1 0 0 / 12%);
+    --perfect: oklch(0.7 0.15 155);
+    --ok: oklch(0.7 0.13 230);
+    --egh: oklch(0.8 0.14 80);
+    --yuck: oklch(0.704 0.191 22.216);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  header.page {
+    position: sticky; top: 0; z-index: 10; height: 48px; box-sizing: border-box;
+    display: flex; align-items: center; gap: 1rem;
+    padding: 0 1.25rem;
+    padding-left: calc(var(--sidebar-w) + 1.25rem);
+    background: color-mix(in oklch, var(--bg) 85%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+
+  main { padding: 1.25rem; padding-left: calc(var(--sidebar-w) + 1.25rem); }
+  .content { max-width: 1100px; margin: 0 auto; }
+  .empty-state { font-size: 12px; color: var(--muted-fg); }
+
+  .tabs { display: flex; gap: 0.25rem; }
+  .tab {
+    display: flex; align-items: center; gap: 0.4rem;
+    font: inherit; font-size: 12px; font-weight: 500; color: var(--muted-fg);
+    background: none; border: none; border-bottom: 2px solid transparent;
+    padding: 0.5rem 0.15rem; margin-bottom: -1px; cursor: pointer;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active { color: var(--fg); border-bottom-color: var(--fg); }
+  .tab .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--border); flex-shrink: 0; }
+  .tab[data-rating="perfect"] .dot { background: var(--perfect); }
+  .tab[data-rating="ok"] .dot { background: var(--ok); }
+  .tab[data-rating="egh"] .dot { background: var(--egh); }
+  .tab[data-rating="yuck"] .dot { background: var(--yuck); }
+
+  .rating-row { display: flex; gap: 0.3rem; flex-shrink: 0; margin-left: auto; }
+  .btn.rating { flex: none; font-size: 11px; padding: 0.3rem 0.6rem; }
+  .btn.rating.perfect.active { background: var(--perfect); color: var(--perfect-fg); border-color: var(--perfect); }
+  .btn.rating.ok.active { background: var(--ok); color: var(--ok-fg); border-color: var(--ok); }
+  .btn.rating.egh.active { background: var(--egh); color: var(--egh-fg); border-color: var(--egh); }
+  .btn.rating.yuck.active { background: var(--yuck); color: var(--yuck-fg); border-color: var(--yuck); }
+
+  .panels { padding-top: 1rem; }
+
+  .variant-card {
+    background: var(--card); color: var(--card-fg);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;
+    max-width: 720px;
+  }
+  .variant-card[hidden] { display: none; }
+  .variant-card[data-rating="perfect"] { outline: 2px solid var(--perfect); outline-offset: -1px; }
+  .variant-card[data-rating="ok"] { outline: 2px solid var(--ok); outline-offset: -1px; }
+  .variant-card[data-rating="egh"] { outline: 2px solid var(--egh); outline-offset: -1px; }
+  .variant-card[data-rating="yuck"] { outline: 2px solid var(--yuck); outline-offset: -1px; }
+
+  .variant-card .rationale { margin: 0; font-size: 12px; color: var(--muted-fg); }
+
+  .preview {
+    border: 1px dashed var(--border); border-radius: calc(var(--radius) - 2px);
+    padding: 1.25rem; background: var(--muted);
+    display: flex; align-items: center; justify-content: center;
+    min-height: 140px; min-width: 220px; max-width: 100%;
+    width: 420px;
+    resize: horizontal; overflow: auto;
+  }
+  .preview-hint { font-size: 10px; color: var(--muted-fg); margin-top: -0.4rem; }
+
+  .btn {
+    flex: 1; font: inherit; font-size: 12px; font-weight: 500;
+    padding: 0.35rem 0.6rem; border-radius: calc(var(--radius) - 2px);
+    border: 1px solid var(--border); background: transparent; color: inherit;
+    cursor: pointer;
+  }
+
+  .sidebar {
+    width: var(--sidebar-w); min-width: 220px; max-width: 640px;
+    position: fixed; left: 0; top: 0; height: 100vh; z-index: 20;
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--border);
+    background: var(--card);
+    resize: horizontal; overflow: auto;
+  }
+  .sidebar-head {
+    height: 48px; flex-shrink: 0; box-sizing: border-box;
+    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+    padding: 0 1.25rem; border-bottom: 1px solid var(--border);
+    background: color-mix(in oklch, var(--bg) 85%, transparent);
+    backdrop-filter: blur(8px);
+  }
+  .sidebar-head h1 { font-size: 13px; font-weight: 600; margin: 0; letter-spacing: 0.01em; }
+  .sidebar-head .round { font-size: 11px; color: var(--muted-fg); }
+  .chat-log { flex: 1; overflow-y: auto; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.55rem; }
+  .chat-empty { font-size: 11px; color: var(--muted-fg); text-align: center; margin-top: 1rem; }
+  .msg { max-width: 88%; padding: 0.4rem 0.55rem; border-radius: calc(var(--radius) - 2px); font-size: 12px; line-height: 1.45; }
+  .msg .who {
+    display: flex; align-items: center; gap: 0.35rem;
+    font-size: 9px; font-weight: 600; color: var(--muted-fg);
+    margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .msg .tag {
+    font-size: 9px; font-weight: 600; text-transform: none; letter-spacing: 0;
+    padding: 0.05rem 0.35rem; border-radius: 999px; border: 1px solid var(--border);
+    color: var(--fg);
+  }
+  .msg .reply-ref {
+    font-size: 10px; color: var(--muted-fg); border-left: 2px solid var(--border);
+    padding-left: 0.4rem; margin-bottom: 0.3rem; opacity: 0.85;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+  }
+  .msg .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: var(--muted); }
+  .msg.claude { align-self: flex-start; background: color-mix(in oklch, var(--perfect) 14%, var(--card)); border: 1px solid var(--border); }
+  .msg.pending .text { opacity: 0.65; animation: pmPulse 1.4s ease-in-out infinite; }
+  @keyframes pmPulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.85; } }
+  .chat-input-row { display: flex; gap: 0.4rem; padding: 0.6rem; border-top: 1px solid var(--border); }
+  .chat-input-row textarea {
+    flex: 1; font: inherit; font-size: 12px; resize: none; min-height: 2.4em;
+    border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+    background: var(--bg); color: var(--fg); padding: 0.4rem 0.5rem;
+  }
+  .chat-input-row .btn { flex: none; padding: 0.35rem 0.7rem; }
+</style>
+
+<header class="page" id="header-bar">
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div class="rating-row">
+    <button class="btn rating perfect" data-rating="perfect">Perfect</button>
+    <button class="btn rating ok" data-rating="ok">Ok</button>
+    <button class="btn rating egh" data-rating="egh">Egh</button>
+    <button class="btn rating yuck" data-rating="yuck">Yuck</button>
+  </div>
+</header>
+
+<aside class="sidebar">
+  <div class="sidebar-head">
+    <h1>Protoman</h1>
+    <span class="round mono" id="sidebar-round"></span>
+  </div>
+  <div class="chat-log" id="chat-log"></div>
+  <div class="chat-input-row">
+    <textarea id="chat-input" placeholder="Message about the option you're viewing..." rows="2"></textarea>
+    <button id="chat-send" class="btn">Send</button>
+  </div>
+</aside>
+<main>
+<div class="content" id="rounds-root">
+  <div class="panels" id="panels"></div>
+</div>
+</main>
+
+<script>
+  (async () => {
+    let feedback = {};
+    let roundData = { round: null, variants: [] };
+    try {
+      feedback = await (await fetch("/api/feedback")).json();
+    } catch {
+      /* server not reachable yet */
+    }
+    try {
+      roundData = await (await fetch("/api/round")).json();
+    } catch {
+      /* no round.json yet */
+    }
+
+    const round = roundData.round;
+    const variants = Array.isArray(roundData.variants) ? roundData.variants : [];
+
+    const headerEl = document.getElementById("header-bar");
+    const tabsEl = document.getElementById("tabs");
+    const panelsEl = document.getElementById("panels");
+    const ratingBtns = Array.from(document.querySelectorAll(".rating-row .btn.rating"));
+    const sidebarRoundLabel = document.getElementById("sidebar-round");
+    const chatLog = document.getElementById("chat-log");
+    const chatInput = document.getElementById("chat-input");
+    const chatSend = document.getElementById("chat-send");
+
+    headerEl.dataset.round = round || "";
+    sidebarRoundLabel.textContent = round || "";
+
+    if (!round || variants.length === 0) {
+      panelsEl.innerHTML = "";
+      const empty = document.createElement("p");
+      empty.className = "empty-state";
+      empty.textContent = "No round loaded yet — waiting on protoman/round.json.";
+      panelsEl.appendChild(empty);
+    } else {
+      variants.forEach((v, i) => {
+        const tab = document.createElement("button");
+        tab.className = "tab" + (i === 0 ? " active" : "");
+        tab.dataset.variant = v.id;
+        const dot = document.createElement("span");
+        dot.className = "dot";
+        tab.appendChild(dot);
+        tab.appendChild(document.createTextNode(v.name || v.id));
+        tabsEl.appendChild(tab);
+
+        const card = document.createElement("article");
+        card.className = "variant-card";
+        card.dataset.round = round;
+        card.dataset.variant = v.id;
+        if (i !== 0) card.hidden = true;
+
+        const rationale = document.createElement("p");
+        rationale.className = "rationale";
+        rationale.textContent = v.rationale || "";
+        card.appendChild(rationale);
+
+        const preview = document.createElement("div");
+        preview.className = "preview";
+        preview.innerHTML = v.html || "";
+        card.appendChild(preview);
+
+        const hint = document.createElement("div");
+        hint.className = "preview-hint";
+        hint.textContent = "drag the bottom-right corner to resize";
+        card.appendChild(hint);
+
+        panelsEl.appendChild(card);
+      });
+    }
+
+    let currentRoundId = round;
+    let currentVariantId = variants[0]?.id;
+
+    const renderMsg = (m) => {
+      const div = document.createElement("div");
+      div.className = "msg " + (m.from === "claude" ? "claude" : "user") + (m.pending ? " pending" : "");
+      const who = document.createElement("div");
+      who.className = "who";
+      const label = document.createElement("span");
+      label.textContent = m.from === "claude" ? "Claude" : "You";
+      who.appendChild(label);
+      if (m.variant) {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = m.variant;
+        who.appendChild(tag);
+      }
+      div.appendChild(who);
+      if (m.replyTo) {
+        const ref = document.createElement("div");
+        ref.className = "reply-ref";
+        ref.textContent = "↪ " + m.replyTo;
+        div.appendChild(ref);
+      }
+      const text = document.createElement("div");
+      text.className = "text";
+      text.textContent = m.text;
+      div.appendChild(text);
+      return div;
+    };
+
+    const renderChat = (roundId) => {
+      currentRoundId = roundId;
+      sidebarRoundLabel.textContent = roundId || "";
+      const msgs = feedback[roundId]?._messages ?? [];
+      chatLog.innerHTML = "";
+      if (msgs.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "chat-empty";
+        empty.textContent = "No messages yet for this round.";
+        chatLog.appendChild(empty);
+      } else {
+        msgs.forEach((m) => chatLog.appendChild(renderMsg(m)));
+      }
+      chatLog.scrollTop = chatLog.scrollHeight;
+    };
+
+    const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+    const sendMessage = async () => {
+      const text = chatInput.value.trim();
+      if (!text || !currentRoundId) return;
+      chatInput.value = "";
+      const variant = currentVariantId;
+      const id = genId();
+      feedback[currentRoundId] ??= {};
+      feedback[currentRoundId]._messages ??= [];
+      feedback[currentRoundId]._messages.push({ id, from: "user", text, variant, ts: new Date().toISOString() });
+      renderChat(currentRoundId);
+      try {
+        await fetch("/api/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ round: currentRoundId, id, from: "user", text, variant }),
+        });
+      } catch {
+        /* best effort - next poll will reconcile if the server was briefly down */
+      }
+    };
+    chatSend.addEventListener("click", sendMessage);
+    chatInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    if (currentRoundId) renderChat(currentRoundId);
+
+    setInterval(async () => {
+      try {
+        feedback = await (await fetch("/api/feedback")).json();
+        if (currentRoundId) renderChat(currentRoundId);
+      } catch {
+        /* server unreachable this tick - try again next tick */
+      }
+    }, 1500);
+
+    if (round && variants.length > 0) {
+      const tabs = Array.from(tabsEl.querySelectorAll(".tab"));
+      const panels = Array.from(panelsEl.querySelectorAll(".variant-card"));
+
+      const ratingOf = (variant) => feedback[round]?.[variant]?.status ?? "pending";
+
+      const applyRatingVisuals = (variant) => {
+        const rating = ratingOf(variant);
+        const card = panels.find((p) => p.dataset.variant === variant);
+        const tab = tabs.find((t) => t.dataset.variant === variant);
+        if (card) card.dataset.rating = rating;
+        if (tab) tab.dataset.rating = rating;
+      };
+      panels.forEach((p) => applyRatingVisuals(p.dataset.variant));
+
+      const renderRating = (variant) => {
+        const rating = ratingOf(variant);
+        ratingBtns.forEach((b) => b.classList.toggle("active", b.dataset.rating === rating));
+      };
+
+      const activate = (variant) => {
+        tabs.forEach((t) => t.classList.toggle("active", t.dataset.variant === variant));
+        panels.forEach((p) => { p.hidden = p.dataset.variant !== variant; });
+        currentVariantId = variant;
+        renderRating(variant);
+      };
+      tabs.forEach((t) => t.addEventListener("click", () => activate(t.dataset.variant)));
+
+      renderRating(currentVariantId);
+
+      ratingBtns.forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const variant = currentVariantId;
+          if (!variant) return;
+          const nextRating = ratingOf(variant) === btn.dataset.rating ? "pending" : btn.dataset.rating;
+          feedback[round] ??= {};
+          feedback[round][variant] = { status: nextRating };
+          applyRatingVisuals(variant);
+          renderRating(variant);
+          try {
+            await fetch("/api/feedback", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ round, variant, status: nextRating }),
+            });
+          } catch {
+            /* best effort - next poll of /api/feedback will reconcile */
+          }
+        });
+      });
+    }
+
+    const sidebarEl = document.querySelector(".sidebar");
+    const SIDEBAR_W_KEY = "protoman-sidebar-w";
+    if (sidebarEl) {
+      try {
+        const savedW = localStorage.getItem(SIDEBAR_W_KEY);
+        if (savedW) {
+          sidebarEl.style.width = savedW;
+          document.documentElement.style.setProperty("--sidebar-w", savedW);
+        }
+      } catch {
+        /* localStorage unavailable (private mode, etc.) - just use the default width */
+      }
+      if (window.ResizeObserver) {
+        let saveTimer;
+        new ResizeObserver(([entry]) => {
+          const w = entry.contentRect.width + "px";
+          document.documentElement.style.setProperty("--sidebar-w", w);
+          clearTimeout(saveTimer);
+          saveTimer = setTimeout(() => {
+            try { localStorage.setItem(SIDEBAR_W_KEY, w); } catch { /* ignore */ }
+          }, 300);
+        }).observe(sidebarEl);
+      }
+    }
+
+    document.addEventListener("click", (e) => {
+      const trigger = e.target.closest(".pm-toggle-trigger");
+      if (trigger) {
+        const demo = trigger.closest(".pm-demo");
+        const menu = demo?.querySelector(".pm-toggle-menu");
+        if (menu) menu.hidden = !menu.hidden;
+        return;
+      }
+      document.querySelectorAll(".pm-toggle-menu:not([hidden])").forEach((menu) => {
+        if (!menu.closest(".pm-demo")?.contains(e.target)) menu.hidden = true;
+      });
+    });
+  })();
+</script>
